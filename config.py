@@ -1,19 +1,77 @@
-import os
+from string import ascii_uppercase
 
+import gspread
 import pandas as pd
-import psycopg2 as ps
-
+from oauth2client.service_account import ServiceAccountCredentials
 from secret import *
 
-from os.path import expanduser
-import requests
-import plotly
-from subprocess import call
 
-pd.set_option('display.height', 1000)
-pd.set_option('display.max_rows', 500)
-pd.set_option('display.max_columns', 500)
-pd.set_option('display.width', 1000)
+def df_to_google_doc(df, workbook_name, wks_name, include_col_names=True, include_index=True):
+    """
+
+    :param df: DataFrame to write
+    :param workbook_name: Name of workbook
+    :param wks_name: Name or worksheet
+    :param include_col_names:
+    :param include_index:
+    :return:
+    """
+    wkb = open_connection_to_google_spreadsheet(workbook_name)
+    wks = wkb.worksheet(wks_name)
+    last_row = len(df.index) if include_col_names else len(df.index) - 1
+    # Give final col name
+    result = []
+    col = len(df.columns)
+    while col:
+        col, rem = divmod(col - 1, 26)
+        result[:0] = ascii_uppercase[rem]
+    last_col = ''.join(result)
+    # Give first col/row name
+    first_col = 'B1' if include_index else 'A1'
+    first_row = 'A2' if include_col_names else 'A1'
+
+    # Add rows/cols if necessary
+    if last_row + 1 > wks.row_count:
+        wks.add_rows(last_row - wks.row_count + 2)
+
+    if len(df.columns) + 1 > wks.col_count:
+        wks.add_cols(len(df.columns) - wks.col_count + 2)
+
+    # Add col names to sheet
+    if include_col_names:
+        cell_list = wks.range('%s:%s1' % (first_col, last_col))
+        for idx, cell in enumerate(cell_list):
+            cell.value = df.columns.values[idx]
+        wks.update_cells(cell_list)
+
+    # Add index to sheet if needed
+    if include_index:
+        cell_list = wks.range('%s:A%d' % (first_row, last_row + 1))
+        for idx, cell in enumerate(cell_list):
+            cell.value = df.index[idx]
+        wks.update_cells(cell_list)
+
+    # Add cell values to sheet
+    # TODO: Large dataframes will break this
+    cells = wks.range('%s%s:%s%d' % (first_col[0], first_row[1], last_col, last_row + 1))
+    for ix_idx, idx in enumerate(df.index):
+        for ix_col, col in enumerate(df.columns.values):
+            col_multiplier = ix_idx * len(df.columns)
+            cells[ix_col + col_multiplier].value = str(df[col][idx])
+    wks.update_cells(cells)
+
+
+def open_connection_to_google_spreadsheet(spreadsheet_name):
+    """
+    Opens a Google spreadsheet
+    :param spreadsheet_name: The name of the spreadsheet
+    :return: workbook object
+    """
+    scope = ['https://spreadsheets.google.com/feeds',
+             'https://www.googleapis.com/auth/drive']
+    credentials = ServiceAccountCredentials.from_json_keyfile_dict(drive_details, scope)
+    gc = gspread.authorize(credentials)
+    return gc.open(spreadsheet_name)
 
 
 def get_first_bday_of_month(mnth=None, yr=None):
@@ -65,36 +123,6 @@ def get_last_weekday_value(weekday):  # Mon = 0, Sun = 6
     day_minus = pd.datetime.today().weekday() + weekday - 1
     return (pd.datetime.today() - pd.tseries.offsets.Day(day_minus)).date()
 
-def plotly_retries(url):
-    """
-    Can mostly get away without using this as we
-    implemented this type of behavior directly into Plotly,
-    but it's not a bad check to handle Plotly's servers
-    being wonky
-    :param url:
-    :return:
-    """
-    import logging
-    logging.basicConfig(filename='%splotly.log' % excel_folder, level=logging.DEBUG,
-                        format='%(asctime)s %(message)s')
-    attempts = 0
-    logging.debug('status code == {}, embed status code == {}, {}, attempt {}'.format(
-            requests.get(url.split('?')[0] + '.png?' + url.split('?')[1]).status_code,
-            requests.get(url.split('?')[0] + '.embed?' + url.split('?')[1]).status_code,
-            url, attempts))
-    while (requests.get(url.split('?')[0] + '.png?' + url.split('?')[1]).status_code == 404 or
-                   requests.get(url.split('?')[0] + '.embed?' + url.split('?')[1]).status_code == 404):
-        logging.debug('404 on {}, attempt {}'.format(url, attempts))
-        attempts += 1
-        if attempts == 7:
-            break
-        # attempt to add secret sharing permissions again
-        url = plotly.plotly.plotly.add_share_key_to_url(url.split('?')[0])
-    url_split = url.split('?')
-    return url_split
-
-
-
 
 '''
 ##############
@@ -103,71 +131,6 @@ def plotly_retries(url):
 #
 ##############
 '''
-
-
-def put_dropbox(read_loc, file_loc, overwrite=False, remove=True):
-    """
-    This puts a specified file into a specified dropbox location
-    Does a try/except check to catch any problems with Dbox servers
-    or your connection
-    :param read_loc: Location of file to put on dropbox
-    :param file_loc: Dropbox folder location
-    :param overwrite: Overwrite any existing Dropbox files of this location
-    :param remove: Remove file from your machinr after
-    :return:
-    """
-    import auth_dropbox
-    ct = 1
-    while ct < 3:
-        try:
-            client = auth_dropbox.auth()
-            f = open(read_loc, 'rb')
-            response = client.put_file(file_loc, f, overwrite=overwrite)
-            if remove:
-                os.remove(read_loc)
-            return response
-        except Exception, e:
-            import time
-            time.sleep(20)
-            ct += 1
-
-
-def get_previous_dropbox(folder):
-    '''
-    #######
-    #
-    #Format needs to be Name_Of_File MM_DD_YYYY.xlsx
-    #This actually finds the latest file that we uploaded and uses it as the "latest file"
-    #
-    #######
-    '''
-    import auth_dropbox
-    client = auth_dropbox.auth()
-    mst = {}
-    contents = client.metadata(folder)['contents']
-    for content in contents:
-        retries = 0
-        while retries < 3:
-            try:
-                mst[pd.Timestamp(content['path'].split('/')[-1].split(' ')[-1].split('.xlsx')[0].replace('_', '/'))] = {
-                    'Path': content['path']}
-                retries = 3
-            except Exception, e:
-                print e
-                retries += 1
-    # Grabs a dataframe of file names with the index as the date on the file(not modified, the actual title)
-    df = pd.DataFrame.from_dict(mst, orient='index')
-    df.sort_index(inplace=True)
-    file_ = client.get_file(df['Path'].ix[-1])
-    lst = pd.read_excel(file_, index_col=0)
-    return lst
-
-
-def get_dropbox(path):
-    import auth_dropbox
-    client = auth_dropbox.auth()
-    # TODO: Check for csv or .xlsx
-    return pd.read_csv(client.get_file(path))
 
 
 def format_percent(item):

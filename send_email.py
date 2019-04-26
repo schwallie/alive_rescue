@@ -4,7 +4,7 @@ from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from smtplib import SMTPDataError
-from email.MIMEImage import MIMEImage
+from email.mime.image import MIMEImage
 
 import config
 
@@ -268,7 +268,7 @@ def send_email(to_user=[config.master_email], SUBJECT="Automated Query Return",
     if csv_loc is not None:
         eh.add_attachment(csv_loc)
     eh.send_email()
-    print 'successfully sent the mail to ', to_user
+    print('successfully sent the mail to {0}'.format(to_user))
 
 
 __author__ = "Chase Schwalbach"
